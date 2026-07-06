@@ -1,0 +1,100 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+name: PR Build (Windows)
+
+# Reusable: invoked by ci.yml. Triggering, path filters, and concurrency
+# live in the umbrella workflow.
+on:
+  workflow_call:
+
+env:
+  RUST_BACKTRACE: 1
+  # The native crate is built without the default `hdfs-opendal` feature because
+  # its libhdfs C bindings (hdfs-sys / hdrs) do not build with MSVC. Object-store
+  # backends (S3, Azure, GCS) remain enabled.
+  CARGO_FLAGS: "--no-default-features"
+
+jobs:
+  build-windows:
+    name: Build & Test (Windows, Spark 4.1)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Java (JDK 17)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Ensure Rust stable (MSVC)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Install protoc
+        run: choco install protoc --no-progress -y
+
+      - name: Cache Cargo registry and target
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('native/**/Cargo.lock', 'native/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cache Maven dependencies
+        uses: actions/cache@v6
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      - name: Build native library (comet.dll, no HDFS)
+        working-directory: native
+        run: cargo build ${{ env.CARGO_FLAGS }}
+
+      - name: Run Rust tests
+        working-directory: native
+        run: cargo test ${{ env.CARGO_FLAGS }}
+
+      # Invoke the Maven wrapper from cmd.exe so the '-Pspark-4.1' profile
+      # argument is not split on the '.' by PowerShell.
+      - name: Build and package JVM modules
+        shell: cmd
+        run: mvnw.cmd -Pspark-4.1 -DskipTests package
+
+      - name: Run native smoke test (Spark on Windows)
+        shell: pwsh
+        run: |
+          # Spark needs Hadoop winutils on Windows.
+          $hadoop = "$env:RUNNER_TEMP\hadoop"
+          New-Item -ItemType Directory -Force -Path "$hadoop\bin" | Out-Null
+          $base = "https://raw.githubusercontent.com/cdarlint/winutils/master/hadoop-3.3.6/bin"
+          Invoke-WebRequest -Uri "$base/winutils.exe" -OutFile "$hadoop\bin\winutils.exe"
+          Invoke-WebRequest -Uri "$base/hadoop.dll" -OutFile "$hadoop\bin\hadoop.dll"
+          $env:HADOOP_HOME = $hadoop
+          $env:Path = "$hadoop\bin;$env:Path"
+          & cmd /c "mvnw.cmd -Pspark-4.1 -pl spark -am -Dsuites=org.apache.comet.CometNativeSuite test"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

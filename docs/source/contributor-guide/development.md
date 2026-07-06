@@ -189,6 +189,64 @@ A few common commands are specified in project's `Makefile`:
   such as Spark.
 - `make clean`: clean up the workspace
 
+## Building on Windows
+
+Comet builds and runs on Windows (x86-64 / MSVC). `make` is not available on a
+stock Windows install, and two steps need Windows-specific handling, so a helper
+script is provided:
+
+```powershell
+pwsh -File dev/build-windows.ps1                       # debug build, spark-4.1
+pwsh -File dev/build-windows.ps1 -Release -SparkProfile spark-3.5
+```
+
+### Prerequisites
+
+- **Rust** with the default `x86_64-pc-windows-msvc` toolchain ([rustup](https://rustup.rs)).
+- **Visual Studio Build Tools** with the "Desktop development with C++" workload
+  (provides the MSVC linker and Windows SDK that the Rust toolchain links against).
+- **JDK 17** for the Spark 4.x profiles, or **JDK 11** for the Spark 3.x profiles.
+  Set `JAVA_HOME` accordingly.
+- **`protoc` (Protocol Buffers >= 3.x)** on `PATH`, or the `PROTOC` environment
+  variable pointing at `protoc.exe`. The native `proto` crate needs it at build
+  time (the JVM build downloads its own copy).
+
+### What the script does (and the manual equivalent)
+
+```powershell
+# 1. Build the native library WITHOUT the Unix-only HDFS backend.
+#    Object-store backends (S3, Azure, GCS) remain enabled.
+cd native
+cargo build --no-default-features            # produces native\target\debug\comet.dll
+cd ..
+
+# 2. Package the JVM modules and bundle comet.dll into the Spark jar.
+#    Invoke the Maven wrapper through cmd.exe so PowerShell does not split the
+#    '-Pspark-4.1' argument on the '.'.
+cmd /c "mvnw.cmd -Pspark-4.1 -DskipTests package"
+```
+
+Native HDFS is intentionally disabled on Windows: it depends on the `libhdfs` C
+bindings (`hdfs-sys` / `hdrs`), which do not build with MSVC.
+
+### Running the tests on Windows
+
+- **Rust:** `cd native; cargo test --no-default-features`
+- **JVM:** Spark requires Hadoop `winutils.exe` on Windows. Download a `winutils.exe`
+  and `hadoop.dll` matching your Hadoop 3.x line, place them in `%HADOOP_HOME%\bin`,
+  and set `HADOOP_HOME`. Then run a suite (again via `cmd /c` for the profile argument):
+
+  ```powershell
+  cmd /c "mvnw.cmd -Pspark-4.1 -pl spark -am -Dsuites=org.apache.comet.CometNativeSuite test"
+  ```
+
+### Line endings
+
+The repository ships a `.gitattributes` that normalizes text files to LF. If you
+cloned before it existed, make sure your checkout uses LF (`git config core.autocrlf
+false` and re-checkout), otherwise line-ending-sensitive tooling such as scalastyle
+may report spurious violations.
+
 ## Common Build and Test Pitfalls
 
 ### Native Code Must Be Built First

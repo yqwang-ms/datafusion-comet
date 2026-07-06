@@ -181,6 +181,18 @@ jobs:
        github.event_name == 'pull_request')
     uses: ./.github/workflows/pr_build_macos.yml
 
+  pr_build_windows:
+    name: PR Build (Windows)
+    needs: changes
+    # Reuse the Linux build change-filter: the same native/JVM sources drive the
+    # Windows build, so no separate filter output is needed.
+    if: |
+      needs.changes.outputs.build_linux == 'true' &&
+      (github.event_name == 'push' ||
+       github.event_name == 'workflow_dispatch' ||
+       github.event_name == 'pull_request')
+    uses: ./.github/workflows/pr_build_windows.yml
+
   pr_benchmark_check:
     name: PR Benchmark Check
     needs: changes
