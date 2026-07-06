@@ -1045,7 +1045,11 @@ under the License.
                 <file>${maven.multiModuleProjectDirectory}/scalafmt.conf</file>
               </scalafmt>
               <licenseHeader>
-                <file>${maven.multiModuleProjectDirectory}/dev/copyright/scala-header.txt</file>
+                <!-- dev/copyright/scala-header.txt is a symlink to java-header.txt. A default
+                     Windows checkout has core.symlinks=false, which materializes the symlink as a
+                     text file containing the link target, so reference the target file directly to
+                     keep spotless working on every platform. The two headers are identical. -->
+                <file>${maven.multiModuleProjectDirectory}/dev/copyright/java-header.txt</file>
               </licenseHeader>
             </scala>
           </configuration>
