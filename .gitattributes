@@ -1,0 +1,43 @@
+# Enforce consistent line endings across platforms.
+#
+# Without this, a Windows checkout with core.autocrlf=true rewrites tracked files
+# with CRLF, which breaks tooling that is sensitive to line endings (for example
+# scalastyle's `// scalastyle:off <rule>` directives) and byte-for-byte text
+# fixture comparisons in the Rust tests. The native code and JVM build both expect
+# LF, so normalize every text file to LF in the working tree.
+
+# Auto-detect text files and normalize them to LF on checkout and commit.
+* text=auto eol=lf
+
+# Windows-only scripts must retain CRLF to run correctly.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Binary files: never perform end-of-line conversion.
+*.jar binary
+*.war binary
+*.ear binary
+*.zip binary
+*.gz binary
+*.tgz binary
+*.tar binary
+*.bz2 binary
+*.7z binary
+*.parquet binary
+*.orc binary
+*.avro binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.so binary
+*.dylib binary
+*.dll binary
+*.a binary
+*.lib binary
+*.class binary
+*.pyc binary
+*.woff binary
+*.woff2 binary
