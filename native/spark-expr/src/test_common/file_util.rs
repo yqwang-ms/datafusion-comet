@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::{env, fs, io::Write, path::PathBuf};
+use std::{env, fs, io::Write, path::{Path, PathBuf}};
 
 /// Returns file handle for a temp file in 'target' directory with a provided content
 pub fn get_temp_file(file_name: &str, content: &[u8]) -> fs::File {
@@ -50,4 +50,16 @@ pub fn get_temp_filename() -> PathBuf {
     path_buf.push(rand::random::<i16>().to_string());
 
     path_buf
+}
+
+/// Convert a filesystem path into a string suitable for object_store and
+/// `datafusion::datasource::listing::PartitionedFile::from_path`.
+///
+/// object_store uses `/` as its only path separator and percent-encodes `\`,
+/// so a Windows `PathBuf` (which renders with `\`) would otherwise be turned
+/// into a double-encoded location (`D:%5C...`) that `LocalFileSystem` rejects.
+/// Converting to forward slashes yields a valid object_store path on Windows
+/// and is a no-op for the paths produced by these tests on Unix.
+pub fn object_store_path_str(path: impl AsRef<Path>) -> String {
+    path.as_ref().to_string_lossy().replace('\\', "/")
 }

@@ -1125,7 +1125,10 @@ mod tests {
         let mut f = File::open(path_buf.as_path())?;
         let mut s = String::new();
         f.read_to_string(&mut s)?;
-        Ok(s)
+        // Normalize line endings so the test is independent of the working-tree checkout style
+        // (git may materialize these text fixtures with CRLF on Windows). The backtrace that the
+        // production code formats always uses `\n`.
+        Ok(s.replace("\r\n", "\n"))
     }
 
     // Example of a simple JNI "Hello World" program.  It can be used to demonstrate:

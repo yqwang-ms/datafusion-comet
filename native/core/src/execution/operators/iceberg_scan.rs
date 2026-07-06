@@ -684,6 +684,16 @@ mod tests {
     }
 
     // The real on-disk size is filled in from the FileIO, replacing the 0 placeholder.
+    //
+    // Ignored on Windows: this exercises iceberg-rust's local `fs` FileIO against a manufactured
+    // absolute path, and iceberg-rust's LocalFs/opendal `fs` backend cannot resolve Windows
+    // drive-letter paths (e.g. `C:/...`). Production never hits this - Iceberg delete files are
+    // always referenced by object-store URI from table metadata, handled identically on every
+    // platform.
+    #[cfg_attr(
+        windows,
+        ignore = "iceberg-rust local fs FileIO does not support Windows drive-letter paths"
+    )]
     #[tokio::test]
     async fn fill_delete_file_sizes_populates_real_size() {
         let dir = tempfile::tempdir().unwrap();

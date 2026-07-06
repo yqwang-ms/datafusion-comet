@@ -1118,7 +1118,9 @@ mod test {
     use datafusion::execution::object_store::ObjectStoreUrl;
     use datafusion::execution::TaskContext;
     use datafusion::physical_plan::ExecutionPlan;
-    use datafusion_comet_spark_expr::test_common::file_util::get_temp_filename;
+    use datafusion_comet_spark_expr::test_common::file_util::{
+        get_temp_filename, object_store_path_str,
+    };
     use datafusion_comet_spark_expr::EvalMode;
     use datafusion_physical_expr_adapter::PhysicalExprAdapterFactory;
     use futures::StreamExt;
@@ -1578,8 +1580,7 @@ mod test {
     #[tokio::test]
     async fn parquet_empty_file_disallowed_widening() -> Result<(), DataFusionError> {
         let file_schema = Arc::new(Schema::new(vec![Field::new("col", DataType::Int32, false)]));
-        let filename = get_temp_filename();
-        let filename = filename.as_path().as_os_str().to_str().unwrap().to_string();
+        let filename = object_store_path_str(get_temp_filename());
         let file = File::create(&filename)?;
         let writer = ArrowWriter::try_new(file, Arc::clone(&file_schema), None)?;
         writer.close()?;
@@ -1622,8 +1623,7 @@ mod test {
         let values = Arc::new(Int32Array::from(vec![1, 2, 3])) as Arc<dyn arrow::array::Array>;
         let batch = RecordBatch::try_new(Arc::clone(&file_schema), vec![values])?;
 
-        let filename = get_temp_filename();
-        let filename = filename.as_path().as_os_str().to_str().unwrap().to_string();
+        let filename = object_store_path_str(get_temp_filename());
         let file = File::create(&filename)?;
         let mut writer = ArrowWriter::try_new(file, Arc::clone(&file_schema), None)?;
         writer.write(&batch)?;
@@ -1685,8 +1685,7 @@ mod test {
         batch: &RecordBatch,
         required_schema: SchemaRef,
     ) -> Result<RecordBatch, DataFusionError> {
-        let filename = get_temp_filename();
-        let filename = filename.as_path().as_os_str().to_str().unwrap().to_string();
+        let filename = object_store_path_str(get_temp_filename());
         let file = File::create(&filename)?;
         let mut writer = ArrowWriter::try_new(file, Arc::clone(&batch.schema()), None)?;
         writer.write(batch)?;
@@ -1733,8 +1732,7 @@ mod test {
         let batch =
             RecordBatch::try_new(Arc::clone(&file_schema), vec![col_a, col_b1, col_b2]).unwrap();
 
-        let filename = get_temp_filename();
-        let filename = filename.as_path().as_os_str().to_str().unwrap().to_string();
+        let filename = object_store_path_str(get_temp_filename());
         let file = File::create(&filename).unwrap();
         let mut writer = ArrowWriter::try_new(file, Arc::clone(&batch.schema()), None).unwrap();
         writer.write(&batch).unwrap();

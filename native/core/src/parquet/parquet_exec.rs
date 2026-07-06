@@ -251,7 +251,9 @@ mod tests {
     use arrow::record_batch::RecordBatch;
     use datafusion::datasource::physical_plan::parquet::metadata::CachedParquetMetaData;
     use datafusion::physical_plan::ExecutionPlan;
-    use datafusion_comet_spark_expr::test_common::file_util::get_temp_filename;
+    use datafusion_comet_spark_expr::test_common::file_util::{
+        get_temp_filename, object_store_path_str,
+    };
     use futures::StreamExt;
     use parquet::arrow::ArrowWriter;
     use parquet::file::properties::{EnabledStatistics, WriterProperties};
@@ -272,12 +274,7 @@ mod tests {
         )
         .unwrap();
 
-        let filename = get_temp_filename()
-            .as_path()
-            .as_os_str()
-            .to_str()
-            .unwrap()
-            .to_string();
+        let filename = object_store_path_str(get_temp_filename());
         let props = WriterProperties::builder()
             .set_statistics_enabled(EnabledStatistics::Page)
             .set_data_page_row_count_limit(100)

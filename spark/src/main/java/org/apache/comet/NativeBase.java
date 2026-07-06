@@ -222,8 +222,9 @@ public abstract class NativeBase {
   }
 
   private enum OS {
-    // Even on Windows, the default compiler from cpptasks (gcc) uses .so as a shared lib extension
-    WINDOWS("win32", "so"),
+    // Windows uses the .dll shared-library extension; the bundled artifact built by
+    // `cargo build` on a Windows/MSVC toolchain is named comet.dll.
+    WINDOWS("win32", "dll"),
     LINUX("linux", "so"),
     MAC("darwin", "dylib"),
     SOLARIS("solaris", "so");

@@ -346,10 +346,11 @@ mod test {
         let num_partitions = 2;
         let runtime_env = create_runtime(memory_limit);
         let metrics_set = ExecutionPlanMetricsSet::new();
+        let dir = tempfile::tempdir().unwrap();
         let mut repartitioner = MultiPartitionShuffleRepartitioner::try_new(
             0,
-            "/tmp/data.out".to_string(),
-            "/tmp/index.out".to_string(),
+            dir.path().join("data.out").to_str().unwrap().to_string(),
+            dir.path().join("index.out").to_str().unwrap().to_string(),
             batch.schema(),
             CometPartitioning::Hash(vec![Arc::new(Column::new("a", 0))], num_partitions),
             ShufflePartitionerMetrics::new(&metrics_set, 0),
@@ -493,6 +494,10 @@ mod test {
             owned_rows_vec
         };
 
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let data_file = tmp_dir.path().join("data.out").to_str().unwrap().to_string();
+        let index_file = tmp_dir.path().join("index.out").to_str().unwrap().to_string();
+
         for partitioning in [
             CometPartitioning::Hash(vec![Arc::new(Column::new("a", 0))], num_partitions),
             CometPartitioning::RangePartitioning(
@@ -512,8 +517,8 @@ mod test {
                 ))),
                 partitioning,
                 CompressionCodec::Zstd(1),
-                "/tmp/data.out".to_string(),
-                "/tmp/index.out".to_string(),
+                data_file.clone(),
+                index_file.clone(),
                 false,
                 1024 * 1024, // write_buffer_size: 1MB default
             )
@@ -559,10 +564,22 @@ mod test {
         let batch = create_batch(batch_size);
         let batches = (0..num_batches).map(|_| batch.clone()).collect::<Vec<_>>();
 
+        let tmp_dir = tempfile::tempdir().unwrap();
+
         // Run shuffle twice and compare results
         for run in 0..2 {
-            let data_file = format!("/tmp/rr_data_{}.out", run);
-            let index_file = format!("/tmp/rr_index_{}.out", run);
+            let data_file = tmp_dir
+                .path()
+                .join(format!("rr_data_{run}.out"))
+                .to_str()
+                .unwrap()
+                .to_string();
+            let index_file = tmp_dir
+                .path()
+                .join(format!("rr_index_{run}.out"))
+                .to_str()
+                .unwrap()
+                .to_string();
 
             let partitions = std::slice::from_ref(&batches);
             let exec = ShuffleWriterExec::try_new(
@@ -597,12 +614,12 @@ mod test {
             if run == 1 {
                 // Compare data files
                 let mut data0 = Vec::new();
-                fs::File::open("/tmp/rr_data_0.out")
+                fs::File::open(tmp_dir.path().join("rr_data_0.out"))
                     .unwrap()
                     .read_to_end(&mut data0)
                     .unwrap();
                 let mut data1 = Vec::new();
-                fs::File::open("/tmp/rr_data_1.out")
+                fs::File::open(tmp_dir.path().join("rr_data_1.out"))
                     .unwrap()
                     .read_to_end(&mut data1)
                     .unwrap();
@@ -613,12 +630,12 @@ mod test {
 
                 // Compare index files
                 let mut index0 = Vec::new();
-                fs::File::open("/tmp/rr_index_0.out")
+                fs::File::open(tmp_dir.path().join("rr_index_0.out"))
                     .unwrap()
                     .read_to_end(&mut index0)
                     .unwrap();
                 let mut index1 = Vec::new();
-                fs::File::open("/tmp/rr_index_1.out")
+                fs::File::open(tmp_dir.path().join("rr_index_1.out"))
                     .unwrap()
                     .read_to_end(&mut index1)
                     .unwrap();
@@ -629,11 +646,7 @@ mod test {
             }
         }
 
-        // Clean up
-        let _ = fs::remove_file("/tmp/rr_data_0.out");
-        let _ = fs::remove_file("/tmp/rr_index_0.out");
-        let _ = fs::remove_file("/tmp/rr_data_1.out");
-        let _ = fs::remove_file("/tmp/rr_index_1.out");
+        // `tmp_dir` removes its contents when dropped.
     }
 
     /// Test that batch coalescing in BufBatchWriter reduces output size by

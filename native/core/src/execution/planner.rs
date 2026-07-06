@@ -4912,6 +4912,7 @@ mod tests {
         test_data_query: &str,
         read_schema: Schema,
     ) -> Result<RecordBatch, DataFusionError> {
+        use datafusion_comet_spark_expr::test_common::file_util::object_store_path_str;
         let session_ctx = SessionContext::new();
 
         // generate test data in the temp folder
@@ -4934,11 +4935,9 @@ mod tests {
             let path = entry.path();
 
             if path.extension().and_then(|ext| ext.to_str()) == Some("parquet") {
-                if let Some(path_str) = path.to_str() {
-                    file_groups.push(FileGroup::new(vec![PartitionedFile::from_path(
-                        path_str.into(),
-                    )?]));
-                }
+                file_groups.push(FileGroup::new(vec![PartitionedFile::from_path(
+                    object_store_path_str(&path),
+                )?]));
             }
         }
 

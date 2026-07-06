@@ -15,6 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
+// `pprof` relies on Unix-only signal APIs and does not build on Windows/MSVC, so
+// this flamegraph profiler is only compiled on Unix targets. On Windows the
+// benchmark target compiles to an empty crate.
+#![cfg(unix)]
+
 use std::{fs::File, os::raw::c_int, path::Path};
 
 use criterion::profiler::Profiler;
