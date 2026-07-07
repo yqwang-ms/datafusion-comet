@@ -340,18 +340,26 @@ impl ParquetWriterExec {
         {
             // Local file system
             {
-                // For a local file system, write directly to file
-                // Strip file:// or file: prefix if present
-                let local_path = output_file_path
-                    .strip_prefix("file://")
-                    .or_else(|| output_file_path.strip_prefix("file:"))
-                    .unwrap_or(output_file_path);
+                // For a local file system, write directly to file.
+                // Convert the file URL to a native filesystem path. Manually stripping the
+                // `file://` prefix leaves an invalid leading slash before the drive letter on
+                // Windows (file:///C:/dir -> /C:/dir, which fails with "The filename, directory
+                // name, or volume label syntax is incorrect"). `Url::to_file_path` handles drive
+                // letters and separators correctly on every platform; fall back to prefix
+                // stripping for inputs that are not valid file URLs.
+                let local_path: std::path::PathBuf = url.to_file_path().unwrap_or_else(|_| {
+                    let stripped = output_file_path
+                        .strip_prefix("file://")
+                        .or_else(|| output_file_path.strip_prefix("file:"))
+                        .unwrap_or(output_file_path);
+                    std::path::PathBuf::from(stripped)
+                });
 
                 // Extract the parent directory from the file path
-                let output_dir = std::path::Path::new(local_path).parent().ok_or_else(|| {
+                let output_dir = local_path.parent().ok_or_else(|| {
                     DataFusionError::Execution(format!(
                         "Failed to extract parent directory from path '{}'",
-                        local_path
+                        local_path.display()
                     ))
                 })?;
 
@@ -364,10 +372,11 @@ impl ParquetWriterExec {
                     ))
                 })?;
 
-                let file = File::create(local_path).map_err(|e| {
+                let file = File::create(&local_path).map_err(|e| {
                     DataFusionError::Execution(format!(
                         "Failed to create output file '{}': {}",
-                        local_path, e
+                        local_path.display(),
+                        e
                     ))
                 })?;
 
