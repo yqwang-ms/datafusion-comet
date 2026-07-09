@@ -64,6 +64,27 @@
 //! export LD_LIBRARY_PATH=${JAVA_HOME}/lib/server:${HADOOP_HOME}/lib/native:${LD_LIBRARY_PATH}
 //! ```
 
+/// Build an `io::Error` that surfaces the real libhdfs/JNI exception root cause when
+/// available. On Windows `io::Error::last_os_error()` reads `GetLastError()`, which
+/// libhdfs does not set (it reports failures via a thread-local Java exception), so the
+/// bare OS error shows up as "os error 0" / "The operation completed successfully". This
+/// helper asks libhdfs for the last exception root cause and folds it into the message.
+pub(crate) fn last_hdfs_error() -> std::io::Error {
+    let os = std::io::Error::last_os_error();
+    unsafe {
+        let cause = hdfs_sys::hdfsGetLastExceptionRootCause();
+        if !cause.is_null() {
+            let msg = std::ffi::CStr::from_ptr(cause).to_string_lossy().into_owned();
+            // libhdfs allocates this string; intentionally leaked (error path only) to
+            // avoid a cross-allocator free between the MSVC CRT and libhdfs.
+            if !msg.trim().is_empty() {
+                return std::io::Error::new(os.kind(), format!("libhdfs: {msg} (os: {os})"));
+            }
+        }
+    }
+    os
+}
+
 mod client;
 pub use client::{Client, ClientBuilder};
 

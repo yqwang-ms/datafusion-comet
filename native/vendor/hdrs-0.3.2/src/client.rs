@@ -169,7 +169,7 @@ impl ClientBuilder {
         };
 
         if fs.is_null() {
-            return Err(io::Error::last_os_error());
+            return Err(crate::last_hdfs_error());
         }
 
         debug!("name node {} connected", self.name_node);
