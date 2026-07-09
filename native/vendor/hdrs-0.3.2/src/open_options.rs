@@ -332,6 +332,17 @@ impl OpenOptions {
     /// [`NotFound`]: io::ErrorKind::NotFound
     /// [`PermissionDenied`]: io::ErrorKind::PermissionDenied
     pub fn open(&self, path: &str) -> Result<File> {
+        // Pure read-only opens go through the process-wide handle cache so a file is opened
+        // once per process and every subsequent range read reuses the handle via pread.
+        if self.read
+            && !self.write
+            && !self.append
+            && !self.truncate
+            && !self.create
+            && !self.create_new
+        {
+            return File::open_cached_readonly(self.fs, path);
+        }
         // O_CLOEXEC is POSIX-only; Windows has no such flag (close-on-exec is N/A).
         #[cfg(not(windows))]
         let cloexec: libc::c_int = libc::O_CLOEXEC;

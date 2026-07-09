@@ -1,5 +1,9 @@
+use std::collections::HashMap;
+use std::ffi::CString;
 use std::io::{Error, ErrorKind, Read, Result, Seek, SeekFrom, Write};
 use std::ptr;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use hdfs_sys::*;
 use libc::c_void;
@@ -35,14 +39,35 @@ pub struct File {
     fs: hdfsFS,
     f: hdfsFile,
     path: String,
+    /// When `Some`, this `File` shares a process-wide cached read-only handle: reads use
+    /// positional `hdfsPread` at this logical offset (interior-mutable so the shared-`&File`
+    /// path used by the async reader can advance it), `seek` only moves this offset, and
+    /// `Drop` does NOT close the handle. When `None`, this is an owned handle with normal
+    /// sequential read/seek and close-on-drop.
+    pread_offset: Option<AtomicI64>,
 }
 
 /// HDFS's client handle is thread safe.
 unsafe impl Send for File {}
 unsafe impl Sync for File {}
 
+/// Process-wide cache of open read-only `hdfsFile` handles, keyed by `(fs_ptr, path)`.
+/// Reused across tasks and range reads so each file is opened once per process (a NameNode
+/// round-trip) instead of once per byte-range read. Handles are read via positional
+/// `hdfsPread` and are never closed (kept for the process lifetime). Stored as `usize` so
+/// the map is `Send + Sync`.
+fn file_cache() -> &'static Mutex<HashMap<(usize, String), usize>> {
+    static CACHE: OnceLock<Mutex<HashMap<(usize, String), usize>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 impl Drop for File {
     fn drop(&mut self) {
+        // Shared cached read-only handles are owned by the process-wide cache; never close
+        // them here (other `File`s and future opens reuse the same handle).
+        if self.pread_offset.is_some() {
+            return;
+        }
         unsafe {
             debug!("file has been closed");
             let _ = hdfsCloseFile(self.fs, self.f);
@@ -58,7 +83,51 @@ impl File {
             fs,
             f,
             path: path.to_string(),
+            pread_offset: None,
         }
+    }
+
+    /// Construct a `File` over a process-wide cached read-only handle: reads are positional
+    /// (`hdfsPread`) at an interior-mutable logical offset and the handle is not closed on drop.
+    pub(crate) fn new_shared(fs: hdfsFS, f: hdfsFile, path: &str) -> Self {
+        File {
+            fs,
+            f,
+            path: path.to_string(),
+            pread_offset: Some(AtomicI64::new(0)),
+        }
+    }
+
+    /// Open a read-only file through the process-wide handle cache. A given file is opened
+    /// once per process via `hdfsOpenFile`; every subsequent range read reuses the same
+    /// handle via positional `hdfsPread`. Parquet scans issue many range reads per file, so
+    /// avoiding a fresh open (a NameNode round-trip) per range is the dominant latency win.
+    pub(crate) fn open_cached_readonly(fs: hdfsFS, path: &str) -> Result<File> {
+        let key = (fs as usize, path.to_string());
+        if let Ok(cache) = file_cache().lock() {
+            if let Some(&h) = cache.get(&key) {
+                return Ok(File::new_shared(fs, h as hdfsFile, path));
+            }
+        }
+        // Open outside the lock so opens of different files don't serialize.
+        let f = unsafe {
+            let p = CString::new(path)?;
+            hdfsOpenFile(fs, p.as_ptr(), libc::O_RDONLY, 0, 0, 0)
+        };
+        if f.is_null() {
+            return Err(crate::hdfs_err_ctx(&format!("open({path})")));
+        }
+        if let Ok(mut cache) = file_cache().lock() {
+            if let Some(&existing) = cache.get(&key) {
+                // Lost a race with another thread: reuse its handle and close ours.
+                unsafe {
+                    let _ = hdfsCloseFile(fs, f);
+                }
+                return Ok(File::new_shared(fs, existing as hdfsFile, path));
+            }
+            cache.insert(key, f as usize);
+        }
+        Ok(File::new_shared(fs, f, path))
     }
 
     /// Works only for files opened in read-only mode.
@@ -103,6 +172,14 @@ impl File {
 
 impl Read for File {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        // Shared cached read-only handles read positionally so many concurrent readers can
+        // share one open handle without a shared cursor.
+        if let Some(off) = self.pread_offset.as_ref() {
+            let pos = off.load(Ordering::SeqCst);
+            let n = self.read_at(buf, pos as u64)?;
+            off.fetch_add(n as i64, Ordering::SeqCst);
+            return Ok(n);
+        }
         let n = unsafe {
             hdfsRead(
                 self.fs,
@@ -122,6 +199,15 @@ impl Read for File {
 
 impl Seek for File {
     fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
+        if let Some(off) = self.pread_offset.as_ref() {
+            let newpos: i64 = match pos {
+                SeekFrom::Start(n) => n as i64,
+                SeekFrom::Current(n) => off.load(Ordering::SeqCst) + n,
+                SeekFrom::End(n) => Client::new(self.fs).metadata(&self.path)?.len() as i64 + n,
+            };
+            off.store(newpos, Ordering::SeqCst);
+            return Ok(newpos as u64);
+        }
         match pos {
             SeekFrom::Start(n) => {
                 self.inner_seek(n as i64)?;
@@ -174,6 +260,13 @@ impl Write for File {
 
 impl Read for &File {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        // Shared cached read-only handles read positionally (see `impl Read for File`).
+        if let Some(off) = self.pread_offset.as_ref() {
+            let pos = off.load(Ordering::SeqCst);
+            let n = self.read_at(buf, pos as u64)?;
+            off.fetch_add(n as i64, Ordering::SeqCst);
+            return Ok(n);
+        }
         let n = unsafe {
             hdfsRead(
                 self.fs,
@@ -193,6 +286,15 @@ impl Read for &File {
 
 impl Seek for &File {
     fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
+        if let Some(off) = self.pread_offset.as_ref() {
+            let newpos: i64 = match pos {
+                SeekFrom::Start(n) => n as i64,
+                SeekFrom::Current(n) => off.load(Ordering::SeqCst) + n,
+                SeekFrom::End(n) => Client::new(self.fs).metadata(&self.path)?.len() as i64 + n,
+            };
+            off.store(newpos, Ordering::SeqCst);
+            return Ok(newpos as u64);
+        }
         match pos {
             SeekFrom::Start(n) => {
                 self.inner_seek(n as i64)?;

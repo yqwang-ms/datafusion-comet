@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::io;
 use std::mem::MaybeUninit;
+use std::sync::{Mutex, OnceLock};
 
 use errno::{set_errno, Errno};
 use hdfs_sys::*;
@@ -55,6 +57,21 @@ pub struct ClientBuilder {
     name_node: String,
     user: Option<String>,
     kerberos_ticket_cache_path: Option<String>,
+}
+
+/// Process-wide cache of established libhdfs connections, keyed by `"<name_node>\0<user>"`.
+///
+/// Establishing a connection is expensive: on an HA cluster `hdfsBuilderConnect` performs a
+/// (potentially sequential) NameNode failover probe and a fresh authentication handshake
+/// (e.g. an mt-token exchange). On a Spark executor this cost is otherwise paid once per task,
+/// which dominates native-scan latency. libhdfs hands out a single, thread-safe Java
+/// `FileSystem` handle for a given `(uri, conf, user)` and `Client` deliberately has no `Drop`
+/// (it never calls `hdfsDisconnect` — see `Client` docs), so the raw handle is safe to share
+/// across every task thread in the process for the process lifetime. Stored as `usize` so the
+/// map is `Send + Sync`.
+fn connection_cache() -> &'static Mutex<HashMap<String, usize>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 impl ClientBuilder {
@@ -138,6 +155,21 @@ impl ClientBuilder {
         // Windows/embedded: attach to the executor JVM via the MT libhdfs jvmInit(reuseJvm=1)
         // before the first libhdfs call, otherwise hdfsBuilderConnect fails silently.
         crate::ensure_jvm_init();
+
+        // Reuse a process-wide connection for the same (name_node, user) instead of paying the
+        // libhdfs connect + HA-failover + auth cost on every task. See `connection_cache`.
+        let cache_key = format!(
+            "{}\u{0}{}",
+            &self.name_node,
+            self.user.as_deref().unwrap_or("")
+        );
+        if let Ok(cache) = connection_cache().lock() {
+            if let Some(&fs) = cache.get(&cache_key) {
+                debug!("reuse cached hdfs connection for {}", &self.name_node);
+                return Ok(Client::new(fs as hdfsFS));
+            }
+        }
+
         set_errno(Errno(0));
 
         debug!("connect name node {}", &self.name_node);
@@ -200,6 +232,10 @@ impl ClientBuilder {
         }
 
         debug!("name node {} connected", self.name_node);
+        // Publish the freshly established connection so sibling tasks in this process reuse it.
+        if let Ok(mut cache) = connection_cache().lock() {
+            cache.insert(cache_key, fs as usize);
+        }
         Ok(Client::new(fs))
     }
 }
