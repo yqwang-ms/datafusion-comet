@@ -135,6 +135,9 @@ impl ClientBuilder {
     /// let mut client = ClientBuilder::new("default").connect();
     /// ```
     pub fn connect(self) -> io::Result<Client> {
+        // Windows/embedded: attach to the executor JVM via the MT libhdfs jvmInit(reuseJvm=1)
+        // before the first libhdfs call, otherwise hdfsBuilderConnect fails silently.
+        crate::ensure_jvm_init();
         set_errno(Errno(0));
 
         debug!("connect name node {}", &self.name_node);
@@ -147,6 +150,30 @@ impl ClientBuilder {
             let mut ticket_cache_path = MaybeUninit::uninit();
 
             unsafe { hdfsBuilderSetNameNode(builder, name_node.as_ptr()) };
+
+            // Inject extra HDFS config (e.g. HA nameservice properties) that libhdfs's own
+            // `new Configuration()` may fail to pick up when running embedded/attached inside the
+            // Spark executor JVM: the JNI-attached thread's classloader can miss the localized
+            // `__hadoop_conf__`, so `dfs.nameservices` is absent and a logical HA URI is wrongly
+            // treated as a hostname (UnknownHostException). Setting the properties directly on the
+            // builder bypasses classpath resource loading entirely.
+            // Format: "key1=val1;key2=val2;..." (values may contain ',' ':' '.' but not ';' or '=').
+            if let Ok(extra) = std::env::var("HDRS_HDFS_CONF") {
+                for pair in extra.split(';') {
+                    let pair = pair.trim();
+                    if pair.is_empty() {
+                        continue;
+                    }
+                    if let Some((k, v)) = pair.split_once('=') {
+                        if let (Ok(ck), Ok(cv)) = (CString::new(k.trim()), CString::new(v.trim()))
+                        {
+                            unsafe {
+                                hdfsBuilderConfSetStr(builder, ck.as_ptr(), cv.as_ptr());
+                            }
+                        }
+                    }
+                }
+            }
 
             if let Some(v) = self.user {
                 user.write(CString::new(v)?);

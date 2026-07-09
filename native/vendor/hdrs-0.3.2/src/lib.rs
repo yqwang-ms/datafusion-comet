@@ -116,6 +116,52 @@ fn clip(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
+/// On Windows, Comet's native HDFS runs *embedded inside the Spark executor JVM*. The MT
+/// libhdfs (built with DYNAMIC_LINKING_JVM_DLL) exposes `jvmInit`, which must be called once
+/// before any other libhdfs call so it ATTACHES to the preexisting JVM (reuseJvm=1) instead
+/// of trying to create a new one. Without it, `hdfsBuilderConnect` returns NULL silently
+/// (getGlobalJNIEnv takes the create-VM path -> "CLASSPATH not set" / wildcard_expandPath).
+#[cfg(windows)]
+pub(crate) fn ensure_jvm_init() {
+    use std::os::raw::{c_char, c_int};
+    use std::sync::Once;
+    extern "C" {
+        fn jvmInit(
+            reuse_jvm: c_int,
+            jre_path: *const c_char,
+            use_java11: c_int,
+            use_ic: c_int,
+            jar_path_4ic: *const c_char,
+            conf_dir_path_4ic: *const c_char,
+            e_cps_4ic: *mut *mut c_char,
+            e_cps_4ic_len: usize,
+        ) -> c_int;
+    }
+    static JVM_INIT: Once = Once::new();
+    JVM_INIT.call_once(|| {
+        // reuseJvm=1 (attach to executor JVM), useJava11=1, useIC=0 (use the default
+        // classloader of the preexisting JVM, which already has the Hadoop classes).
+        let rc = unsafe {
+            jvmInit(
+                1,
+                std::ptr::null(),
+                1,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc != 0 {
+            log::warn!("hdrs: jvmInit(reuseJvm=1) returned {rc}");
+        }
+    });
+}
+
+#[cfg(not(windows))]
+pub(crate) fn ensure_jvm_init() {}
+
 mod client;
 pub use client::{Client, ClientBuilder};
 
