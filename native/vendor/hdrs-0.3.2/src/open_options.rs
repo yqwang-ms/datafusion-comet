@@ -347,7 +347,7 @@ impl OpenOptions {
         };
 
         if b.is_null() {
-            return Err(crate::last_hdfs_error());
+            return Err(crate::hdfs_err_ctx(&format!("open({path})")));
         }
 
         debug!("file {} with flags {} opened", path, flags);

@@ -69,24 +69,51 @@
 /// libhdfs does not set (it reports failures via a thread-local Java exception), so the
 /// bare OS error shows up as "os error 0" / "The operation completed successfully". This
 /// helper asks libhdfs for the last exception root cause and folds it into the message.
-pub(crate) fn last_hdfs_error() -> std::io::Error {
+/// Build an `io::Error` that surfaces the real libhdfs/JNI failure.
+///
+/// On Windows `io::Error::last_os_error()` reads `GetLastError()`, which libhdfs does not
+/// set, so failures otherwise show up as "os error 0". This pulls BOTH the last exception
+/// root cause AND its stack trace (thread-local, owned by libhdfs, valid until the next
+/// libHDFS call on this thread — do not free), plus an optional operation/path context, so
+/// Windows failures are debuggable.
+pub(crate) fn hdfs_err_ctx(ctx: &str) -> std::io::Error {
     let os = std::io::Error::last_os_error();
-    let detail = unsafe {
-        let cause = hdfs_sys::hdfsGetLastExceptionRootCause();
-        if cause.is_null() {
-            "<no JNI exception recorded>".to_string()
-        } else {
-            // libhdfs allocates this string; intentionally leaked (error path only) to
-            // avoid a cross-allocator free between the MSVC CRT and libhdfs.
-            let msg = std::ffi::CStr::from_ptr(cause).to_string_lossy().into_owned();
-            if msg.trim().is_empty() {
-                "<empty JNI exception>".to_string()
-            } else {
-                msg
-            }
-        }
+    // libhdfs sets the C runtime errno on failure; on Windows `last_os_error()` reads
+    // GetLastError() which libhdfs does NOT set (so it's often 0). Read the C errno too.
+    let c_errno = errno::errno();
+    let root = unsafe { cstr_owned(hdfs_sys::hdfsGetLastExceptionRootCause()) };
+    let trace = unsafe { cstr_owned(hdfs_sys::hdfsGetLastExceptionStackTrace()) };
+    let detail = match (root, trace) {
+        (Some(r), Some(t)) => format!("{r} || stack: {}", clip(&t, 1500)),
+        (Some(r), None) => r,
+        (None, Some(t)) => format!("<no root cause> || stack: {}", clip(&t, 1500)),
+        (None, None) => "<no JNI exception recorded>".to_string(),
     };
-    std::io::Error::new(os.kind(), format!("hdrs/libhdfs: {detail} (os: {os})"))
+    let prefix = if ctx.is_empty() {
+        String::new()
+    } else {
+        format!("{ctx}: ")
+    };
+    std::io::Error::new(
+        os.kind(),
+        format!("hdrs/libhdfs: {prefix}{detail} (c_errno={c_errno}, os: {os})"),
+    )
+}
+
+unsafe fn cstr_owned(p: *mut std::os::raw::c_char) -> Option<String> {
+    if p.is_null() {
+        return None;
+    }
+    let s = std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned();
+    if s.trim().is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+fn clip(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
 }
 
 mod client;

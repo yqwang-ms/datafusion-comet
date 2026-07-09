@@ -66,7 +66,7 @@ impl File {
         let n = unsafe { hdfsSeek(self.fs, self.f, offset) };
 
         if n == -1 {
-            return Err(crate::last_hdfs_error());
+            return Err(crate::hdfs_err_ctx("seek"));
         }
 
         Ok(())
@@ -94,7 +94,7 @@ impl File {
         };
 
         if n == -1 {
-            return Err(crate::last_hdfs_error());
+            return Err(crate::hdfs_err_ctx("pread"));
         }
 
         Ok(n as usize)
@@ -113,7 +113,7 @@ impl Read for File {
         };
 
         if n == -1 {
-            return Err(crate::last_hdfs_error());
+            return Err(crate::hdfs_err_ctx("read"));
         }
 
         Ok(n as usize)
@@ -184,7 +184,7 @@ impl Read for &File {
         };
 
         if n == -1 {
-            return Err(crate::last_hdfs_error());
+            return Err(crate::hdfs_err_ctx("read"));
         }
 
         Ok(n as usize)

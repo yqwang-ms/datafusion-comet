@@ -169,7 +169,7 @@ impl ClientBuilder {
         };
 
         if fs.is_null() {
-            return Err(crate::last_hdfs_error());
+            return Err(crate::hdfs_err_ctx("connect"));
         }
 
         debug!("name node {} connected", self.name_node);
@@ -362,7 +362,7 @@ impl Client {
         };
 
         if hfi.is_null() {
-            return Err(crate::last_hdfs_error());
+            return Err(crate::hdfs_err_ctx(&format!("stat({path})")));
         }
 
         // Safety: hfi must be valid
