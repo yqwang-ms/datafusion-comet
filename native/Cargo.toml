@@ -78,3 +78,9 @@ codegen-units = 16   # Parallel codegen (faster compile, slightly larger binary)
 debug-assertions = true
 panic = "unwind"     # Allow panics to be caught and logged across FFI boundary
 # overflow-checks inherited as false from release
+
+# LOCAL/EXPERIMENTAL: use a Windows-patched hdrs so the hdfs-opendal native HDFS path
+# compiles on MSVC (upstream 0.3.2 uses libc::O_CLOEXEC and i32 file-info fields that
+# don't exist / mismatch on Windows). See native/vendor/hdrs-0.3.2.
+[patch.crates-io]
+hdrs = { path = "vendor/hdrs-0.3.2" }

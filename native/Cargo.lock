@@ -3377,8 +3377,6 @@ dependencies = [
 [[package]]
 name = "hdrs"
 version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7c42a693bfe5dc8fcad1f24044c5ec355c5f157b8ce63c7d62f51cecbc7878d"
 dependencies = [
  "blocking",
  "errno",
