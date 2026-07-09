@@ -71,18 +71,22 @@
 /// helper asks libhdfs for the last exception root cause and folds it into the message.
 pub(crate) fn last_hdfs_error() -> std::io::Error {
     let os = std::io::Error::last_os_error();
-    unsafe {
+    let detail = unsafe {
         let cause = hdfs_sys::hdfsGetLastExceptionRootCause();
-        if !cause.is_null() {
-            let msg = std::ffi::CStr::from_ptr(cause).to_string_lossy().into_owned();
+        if cause.is_null() {
+            "<no JNI exception recorded>".to_string()
+        } else {
             // libhdfs allocates this string; intentionally leaked (error path only) to
             // avoid a cross-allocator free between the MSVC CRT and libhdfs.
-            if !msg.trim().is_empty() {
-                return std::io::Error::new(os.kind(), format!("libhdfs: {msg} (os: {os})"));
+            let msg = std::ffi::CStr::from_ptr(cause).to_string_lossy().into_owned();
+            if msg.trim().is_empty() {
+                "<empty JNI exception>".to_string()
+            } else {
+                msg
             }
         }
-    }
-    os
+    };
+    std::io::Error::new(os.kind(), format!("hdrs/libhdfs: {detail} (os: {os})"))
 }
 
 mod client;

@@ -362,7 +362,7 @@ impl Client {
         };
 
         if hfi.is_null() {
-            return Err(io::Error::last_os_error());
+            return Err(crate::last_hdfs_error());
         }
 
         // Safety: hfi must be valid
