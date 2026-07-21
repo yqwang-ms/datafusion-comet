@@ -896,8 +896,12 @@ class CometExpressionSuite extends CometTestBase with AdaptiveSparkPlanHelper {
     Seq("char", "varchar").foreach { typ =>
       withTempPath { dir =>
         withTable("t") {
-          sql("select '123456' as col").write.format("parquet").save(dir.toString)
-          sql(s"create table t (col $typ(2)) using parquet location '$dir'")
+          // Use a file: URI (not the raw path) so this works on Windows too: a bare
+          // Windows path such as C:\...\dir makes Hadoop's Path.getParent walk hit an
+          // empty string in FileStreamSink.ancestorIsMetadataDirectory.
+          val location = dir.toURI.toString
+          sql("select '123456' as col").write.format("parquet").save(location)
+          sql(s"create table t (col $typ(2)) using parquet location '$location'")
           sql("insert into t values('1')")
           checkSparkAnswerAndOperator(sql("select substring(col, 1) from t"))
           checkSparkAnswerAndOperator(sql("select substring(col, 0) from t"))
