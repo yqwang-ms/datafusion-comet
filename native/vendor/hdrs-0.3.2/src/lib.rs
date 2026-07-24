@@ -64,22 +64,28 @@
 //! export LD_LIBRARY_PATH=${JAVA_HOME}/lib/server:${HADOOP_HOME}/lib/native:${LD_LIBRARY_PATH}
 //! ```
 
-/// Build an `io::Error` that surfaces the real libhdfs/JNI exception root cause when
-/// available. On Windows `io::Error::last_os_error()` reads `GetLastError()`, which
-/// libhdfs does not set (it reports failures via a thread-local Java exception), so the
-/// bare OS error shows up as "os error 0" / "The operation completed successfully". This
-/// helper asks libhdfs for the last exception root cause and folds it into the message.
 /// Build an `io::Error` that surfaces the real libhdfs/JNI failure.
 ///
-/// On Windows `io::Error::last_os_error()` reads `GetLastError()`, which libhdfs does not
-/// set, so failures otherwise show up as "os error 0". This pulls BOTH the last exception
-/// root cause AND its stack trace (thread-local, owned by libhdfs, valid until the next
-/// libHDFS call on this thread — do not free), plus an optional operation/path context, so
-/// Windows failures are debuggable.
+/// libhdfs reports errors two ways: it sets the C `errno` (e.g. `FileNotFoundException`
+/// maps to `ENOENT`; see libhdfs `exception.c`) AND it records the Java exception in a
+/// thread-local retrievable via `hdfsGetLastException*`. On Windows neither the OS error
+/// nor `errno` is reliable here:
+/// - `io::Error::last_os_error()` reads `GetLastError()`, which libhdfs never sets, so it
+///   shows up as "os error 0" / "The operation completed successfully".
+/// - `errno` IS set by libhdfs, but into the thread-local of the C runtime that
+///   `hadoop.dll` is linked against. Loaded inside a Rust cdylib (Comet's `comet.dll`)
+///   linked against a different CRT, the `errno` crate reads a DIFFERENT thread-local and
+///   observes 0 — so `os.kind()` is `Uncategorized` even for a genuinely missing path.
+///
+/// Therefore this helper reads the last exception root cause AND stack trace (thread-local,
+/// owned by libhdfs, valid until the next libHDFS call on this thread — do not free), folds
+/// them into the message, and — crucially — derives the `io::ErrorKind` from the JNI root
+/// cause rather than the unreliable `errno` (see `detail_is_not_found`).
 pub(crate) fn hdfs_err_ctx(ctx: &str) -> std::io::Error {
     let os = std::io::Error::last_os_error();
-    // libhdfs sets the C runtime errno on failure; on Windows `last_os_error()` reads
-    // GetLastError() which libhdfs does NOT set (so it's often 0). Read the C errno too.
+    // Kept for diagnostics only: on Windows this often reads 0 because libhdfs writes errno
+    // into a different CRT's thread-local than the one this crate is linked against (see the
+    // doc comment above). Do NOT classify the error kind from it.
     let c_errno = errno::errno();
     let root = unsafe { cstr_owned(hdfs_sys::hdfsGetLastExceptionRootCause()) };
     let trace = unsafe { cstr_owned(hdfs_sys::hdfsGetLastExceptionStackTrace()) };
@@ -94,10 +100,32 @@ pub(crate) fn hdfs_err_ctx(ctx: &str) -> std::io::Error {
     } else {
         format!("{ctx}: ")
     };
+    // Derive the kind from the JNI root cause, not from `errno`/`GetLastError()` (both
+    // unreliable across the Windows CRT/DLL boundary — see the doc comment above). Callers
+    // such as opendal's HDFS writer and Comet's native Parquet writer rely on
+    // `ErrorKind::NotFound` to distinguish "path is absent" (e.g. a brand-new output file
+    // that must be created) from a real I/O failure; libhdfs surfaces that as a
+    // `FileNotFoundException` (which it also maps to `ENOENT` in `exception.c`).
+    let kind = if os.kind() != std::io::ErrorKind::NotFound && detail_is_not_found(&detail) {
+        std::io::ErrorKind::NotFound
+    } else {
+        os.kind()
+    };
     std::io::Error::new(
-        os.kind(),
+        kind,
         format!("hdrs/libhdfs: {prefix}{detail} (c_errno={c_errno}, os: {os})"),
     )
+}
+
+/// Whether a libhdfs/JNI exception detail denotes a missing path.
+///
+/// The detail begins with libhdfs's `hdfsGetLastExceptionRootCause()`, which returns
+/// `ExceptionUtils.getRootCauseMessage()` — always formatted `"ShortClassName: message"`,
+/// e.g. `"FileNotFoundException: File does not exist: /path"`. Matching on the
+/// (non-localized) exception class name is therefore robust across HDFS message wording and
+/// locales.
+fn detail_is_not_found(detail: &str) -> bool {
+    detail.contains("FileNotFoundException")
 }
 
 unsafe fn cstr_owned(p: *mut std::os::raw::c_char) -> Option<String> {
@@ -181,3 +209,33 @@ pub use metadata::Metadata;
 
 mod readdir;
 pub use readdir::Readdir;
+
+#[cfg(test)]
+mod err_ctx_tests {
+    use super::detail_is_not_found;
+
+    #[test]
+    fn file_not_found_exception_maps_to_not_found() {
+        // The real libhdfs root cause seen on Windows when stat-ing a not-yet-created
+        // Parquet output file (errno stays 0, so kind classification must come from here).
+        assert!(detail_is_not_found(
+            "java.io.FileNotFoundException: File does not exist: \
+             /user/yqwang/comet/out/part-00000.parquet"
+        ));
+        assert!(detail_is_not_found("FileNotFoundException"));
+        // Still matches when a stack trace is appended to the detail.
+        assert!(detail_is_not_found(
+            "org.apache.hadoop.fs.FileNotFoundException: File does not exist \
+             || stack: at org.apache.hadoop.hdfs.DistributedFileSystem.getFileStatus(...)"
+        ));
+    }
+
+    #[test]
+    fn other_failures_do_not_map_to_not_found() {
+        assert!(!detail_is_not_found(
+            "org.apache.hadoop.security.AccessControlException: Permission denied"
+        ));
+        assert!(!detail_is_not_found("<no JNI exception recorded>"));
+        assert!(!detail_is_not_found(""));
+    }
+}
