@@ -23,6 +23,8 @@ pub mod schema_adapter;
 pub mod util;
 
 mod cast_column;
+#[cfg(feature = "hdfs-opendal")]
+mod coalescing_store;
 pub(crate) mod objectstore;
 
 use std::collections::HashMap;

@@ -334,7 +334,11 @@ impl OpenOptions {
     pub fn open(&self, path: &str) -> Result<File> {
         // Pure read-only opens go through the process-wide handle cache so a file is opened
         // once per process and every subsequent range read reuses the handle via pread.
-        if self.read
+        // Gated by `COMET_HDFS_OPT` (see `crate::use_shared_pread`): only the default
+        // `baseline` variant uses the shared cached handle + pread; `seekread`/`coalesce`
+        // fall through to a fresh per-open handle with sequential seek + read.
+        if crate::use_shared_pread()
+            && self.read
             && !self.write
             && !self.append
             && !self.truncate
@@ -351,11 +355,13 @@ impl OpenOptions {
         let flags = cloexec | self.get_access_mode()? | self.get_creation_mode()?;
 
         debug!("open file {} with flags {}", path, flags);
+        let _t = crate::inst_start();
         let b = unsafe {
             let p = CString::new(path)?;
             // TODO: we need to support buffer size, replication and block size.
             hdfsOpenFile(self.fs, p.as_ptr(), flags, 0, 0, 0)
         };
+        crate::inst_end(_t, "open", path, -1, 0);
 
         if b.is_null() {
             return Err(crate::hdfs_err_ctx(&format!("open({path})")));

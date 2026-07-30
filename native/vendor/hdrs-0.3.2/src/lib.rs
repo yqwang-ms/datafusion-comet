@@ -64,6 +64,167 @@
 //! export LD_LIBRARY_PATH=${JAVA_HOME}/lib/server:${HADOOP_HOME}/lib/native:${LD_LIBRARY_PATH}
 //! ```
 
+/// HDFS read-path variant selector, chosen once from the environment variable
+/// `COMET_HDFS_OPT` (set per Spark executor via `spark.executorEnv.COMET_HDFS_OPT`). Lets
+/// the read path be A/B/C benchmarked from a single build (see
+/// BENCHMARK-Parquet-HDFS-Optimize.md):
+///
+/// - unset / `baseline` → `true`: pure read-only opens return a shared, process-wide
+///   cached handle and read positionally via `hdfsPread`, so concurrent range reads on the
+///   same file share one `hdfsOpenFile`.
+/// - `seekread` / `coalesce` → `false`: every open returns a fresh handle read with
+///   sequential `hdfsSeek` + `hdfsRead` (its own cursor), restoring libhdfs read-ahead at
+///   the cost of one `hdfsOpenFile` per range.
+///
+/// Only the file open/read path is affected; the process-wide *connection* cache in
+/// `client.rs` is unchanged in all variants.
+pub(crate) fn use_shared_pread() -> bool {
+    use std::sync::OnceLock;
+    static SHARED: OnceLock<bool> = OnceLock::new();
+    *SHARED.get_or_init(|| match std::env::var("COMET_HDFS_OPT") {
+        Ok(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            v.is_empty() || v == "baseline"
+        }
+        Err(_) => true,
+    })
+}
+
+/// When `COMET_HDFS_READ_FILL=1` (`spark.executorEnv`), `read_at`/`read` loop the underlying
+/// libhdfs call until the requested buffer is full (or EOF). libhdfs short-reads ~120 KB per
+/// `hdfsPread`/`hdfsRead`, so without this each read moved through the async `blocking` pipe
+/// carries only ~120 KB; filling the buffer natively cuts the number of async pipe round-trips
+/// (and keeps consecutive sequential reads in one warm HDFS stream). Parsed once.
+pub(crate) fn read_fill_enabled() -> bool {
+    use std::sync::OnceLock;
+    static F: OnceLock<bool> = OnceLock::new();
+    *F.get_or_init(|| match std::env::var("COMET_HDFS_READ_FILL") {
+        Ok(v) => {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on")
+        }
+        Err(_) => false,
+    })
+}
+
+// ---- Low-level HDFS op instrumentation (env `COMET_HDFS_LOG`) ------------------------
+//
+// Times each libhdfs read/open/connect and reports thread, path, offset, length, elapsed
+// and throughput, so the read path can be characterised per variant and the post-change
+// bottleneck identified. Fully zero-cost when disabled (`inst_start` returns `None` before
+// any clock is read).
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HdfsLogMode {
+    /// No instrumentation (default).
+    Off,
+    /// Periodic per-kind aggregate lines only (`COMET_HDFS_AGG`).
+    Agg,
+    /// One line per op (`COMET_HDFS_OP`) plus the aggregates.
+    Trace,
+}
+
+/// Instrumentation verbosity, from `COMET_HDFS_LOG`
+/// (`spark.executorEnv.COMET_HDFS_LOG`), parsed once: unset/`off` → `Off`; `agg`/`on`/`1` →
+/// `Agg`; `trace`/`2` → `Trace`.
+pub(crate) fn hdfs_log_mode() -> HdfsLogMode {
+    use std::sync::OnceLock;
+    static M: OnceLock<HdfsLogMode> = OnceLock::new();
+    *M.get_or_init(|| match std::env::var("COMET_HDFS_LOG") {
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "trace" | "2" => HdfsLogMode::Trace,
+            "agg" | "on" | "1" | "true" => HdfsLogMode::Agg,
+            _ => HdfsLogMode::Off,
+        },
+        Err(_) => HdfsLogMode::Off,
+    })
+}
+
+/// Process-wide cumulative counters for one op kind.
+struct OpAgg {
+    count: std::sync::atomic::AtomicU64,
+    bytes: std::sync::atomic::AtomicU64,
+    nanos: std::sync::atomic::AtomicU64,
+}
+impl OpAgg {
+    const fn new() -> Self {
+        Self {
+            count: std::sync::atomic::AtomicU64::new(0),
+            bytes: std::sync::atomic::AtomicU64::new(0),
+            nanos: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+static AGG_PREAD: OpAgg = OpAgg::new();
+static AGG_READ: OpAgg = OpAgg::new();
+static AGG_OPEN: OpAgg = OpAgg::new();
+static AGG_CONNECT: OpAgg = OpAgg::new();
+
+fn agg_for(kind: &str) -> &'static OpAgg {
+    match kind {
+        "pread" => &AGG_PREAD,
+        "read" => &AGG_READ,
+        "open" => &AGG_OPEN,
+        _ => &AGG_CONNECT,
+    }
+}
+
+/// Start timing a libhdfs op iff instrumentation is enabled (otherwise no clock is read).
+#[inline]
+pub(crate) fn inst_start() -> Option<std::time::Instant> {
+    if hdfs_log_mode() == HdfsLogMode::Off {
+        None
+    } else {
+        Some(std::time::Instant::now())
+    }
+}
+
+/// Finish timing a libhdfs op: in `Trace` emit a per-op `COMET_HDFS_OP` line (thread, path,
+/// offset, len, elapsed_us, mbps); in all enabled modes fold into the per-kind aggregate and
+/// print a `COMET_HDFS_AGG` summary every 2000 ops of that kind.
+pub(crate) fn inst_end(t0: Option<std::time::Instant>, kind: &str, path: &str, offset: i64, len: usize) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let Some(t0) = t0 else {
+        return;
+    };
+    let mode = hdfs_log_mode();
+    let nanos = t0.elapsed().as_nanos() as u64;
+    let th = std::thread::current();
+    let thn = th
+        .name()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("{:?}", th.id()));
+    if mode == HdfsLogMode::Trace {
+        let mbps = if nanos > 0 {
+            (len as f64) / (nanos as f64 / 1e9) / 1e6
+        } else {
+            0.0
+        };
+        eprintln!(
+            "COMET_HDFS_OP\tkind={kind}\tthread={thn}\tpath={path}\toff={offset}\tlen={len}\telapsed_us={}\tmbps={mbps:.1}",
+            nanos / 1000
+        );
+    }
+    let agg = agg_for(kind);
+    let c = agg.count.fetch_add(1, Relaxed) + 1;
+    let b = agg.bytes.fetch_add(len as u64, Relaxed) + len as u64;
+    let n = agg.nanos.fetch_add(nanos, Relaxed) + nanos;
+    if c % 2000 == 0 {
+        let mbps = if n > 0 {
+            (b as f64) / (n as f64 / 1e9) / 1e6
+        } else {
+            0.0
+        };
+        eprintln!(
+            "COMET_HDFS_AGG\tkind={kind}\tthread={thn}\tcount={c}\ttotal_mb={:.1}\tsum_elapsed_s={:.1}\tper_op_mbps={mbps:.1}\tavg_op_us={}\tavg_len={}",
+            (b as f64) / 1e6,
+            (n as f64) / 1e9,
+            n / c / 1000,
+            b / c
+        );
+    }
+}
+
 /// Build an `io::Error` that surfaces the real libhdfs/JNI failure.
 ///
 /// libhdfs reports errors two ways: it sets the C `errno` (e.g. `FileNotFoundException`

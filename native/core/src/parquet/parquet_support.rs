@@ -38,6 +38,9 @@ use datafusion_comet_spark_expr::EvalMode;
 use log::debug;
 use object_store::path::Path;
 use object_store::{parse_url, ObjectStore};
+
+#[cfg(feature = "hdfs-opendal")]
+use crate::parquet::coalescing_store::CoalescingObjectStore;
 use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -471,6 +474,21 @@ pub(crate) fn create_hdfs_operator(url: &Url) -> Result<opendal::Operator, objec
         .map(|op| op.finish())
 }
 
+/// Whether to wrap the HDFS object store in the range-coalescing decorator, selected by
+/// `COMET_HDFS_OPT=coalesce` (set per executor via `spark.executorEnv.COMET_HDFS_OPT`).
+/// Read once. See `coalescing_store::CoalescingObjectStore` and
+/// BENCHMARK-Parquet-HDFS-Optimize.md.
+#[cfg(feature = "hdfs-opendal")]
+fn hdfs_coalesce_enabled() -> bool {
+    use std::sync::OnceLock;
+    static COALESCE: OnceLock<bool> = OnceLock::new();
+    *COALESCE.get_or_init(|| {
+        std::env::var("COMET_HDFS_OPT")
+            .map(|v| v.trim().eq_ignore_ascii_case("coalesce"))
+            .unwrap_or(false)
+    })
+}
+
 // Creates an HDFS object store from a URL using OpenDAL
 #[cfg(feature = "hdfs-opendal")]
 pub(crate) fn create_hdfs_object_store(
@@ -479,7 +497,14 @@ pub(crate) fn create_hdfs_object_store(
     let op = create_hdfs_operator(url)?;
     let store = object_store_opendal::OpendalStore::new(op);
     let path = Path::parse(url.path())?;
-    Ok((Box::new(store), path))
+    // COMET_HDFS_OPT=coalesce: wrap the opendal store so adjacent Parquet column-chunk
+    // ranges are merged into a single sequential read (see `coalescing_store`).
+    if hdfs_coalesce_enabled() {
+        let inner: std::sync::Arc<dyn ObjectStore> = std::sync::Arc::new(store);
+        Ok((Box::new(CoalescingObjectStore::new(inner)), path))
+    } else {
+        Ok((Box::new(store), path))
+    }
 }
 
 #[cfg(feature = "hdfs-opendal")]
