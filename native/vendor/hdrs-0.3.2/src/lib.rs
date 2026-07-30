@@ -90,23 +90,6 @@ pub(crate) fn use_shared_pread() -> bool {
     })
 }
 
-/// When `COMET_HDFS_READ_FILL=1` (`spark.executorEnv`), `read_at`/`read` loop the underlying
-/// libhdfs call until the requested buffer is full (or EOF). libhdfs short-reads ~120 KB per
-/// `hdfsPread`/`hdfsRead`, so without this each read moved through the async `blocking` pipe
-/// carries only ~120 KB; filling the buffer natively cuts the number of async pipe round-trips
-/// (and keeps consecutive sequential reads in one warm HDFS stream). Parsed once.
-pub(crate) fn read_fill_enabled() -> bool {
-    use std::sync::OnceLock;
-    static F: OnceLock<bool> = OnceLock::new();
-    *F.get_or_init(|| match std::env::var("COMET_HDFS_READ_FILL") {
-        Ok(v) => {
-            let v = v.trim();
-            v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on")
-        }
-        Err(_) => false,
-    })
-}
-
 // ---- Low-level HDFS op instrumentation (env `COMET_HDFS_LOG`) ------------------------
 //
 // Times each libhdfs read/open/connect and reports thread, path, offset, length, elapsed

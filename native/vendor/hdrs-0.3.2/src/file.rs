@@ -155,36 +155,21 @@ impl File {
 
     pub fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
         let _t = crate::inst_start();
-        let fill = crate::read_fill_enabled();
-        let mut filled = 0usize;
-        loop {
-            let want = (buf.len() - filled).min(FILE_LIMIT);
-            if want == 0 {
-                break;
-            }
-            let n = unsafe {
-                hdfsPread(
-                    self.fs,
-                    self.f,
-                    (offset + filled as u64) as i64,
-                    buf[filled..].as_ptr() as *mut c_void,
-                    want as i32,
-                )
-            };
-            if n == -1 {
-                crate::inst_end(_t, "pread", &self.path, offset as i64, filled);
-                return Err(crate::hdfs_err_ctx("pread"));
-            }
-            if n == 0 {
-                break;
-            }
-            filled += n as usize;
-            if !fill {
-                break;
-            }
+        let n = unsafe {
+            hdfsPread(
+                self.fs,
+                self.f,
+                offset as i64,
+                buf.as_ptr() as *mut c_void,
+                buf.len().min(FILE_LIMIT) as i32,
+            )
+        };
+        if n == -1 {
+            crate::inst_end(_t, "pread", &self.path, offset as i64, 0);
+            return Err(crate::hdfs_err_ctx("pread"));
         }
-        crate::inst_end(_t, "pread", &self.path, offset as i64, filled);
-        Ok(filled)
+        crate::inst_end(_t, "pread", &self.path, offset as i64, n as usize);
+        Ok(n as usize)
     }
 }
 
@@ -199,35 +184,20 @@ impl Read for File {
             return Ok(n);
         }
         let _t = crate::inst_start();
-        let fill = crate::read_fill_enabled();
-        let mut filled = 0usize;
-        loop {
-            let want = (buf.len() - filled).min(FILE_LIMIT);
-            if want == 0 {
-                break;
-            }
-            let n = unsafe {
-                hdfsRead(
-                    self.fs,
-                    self.f,
-                    buf[filled..].as_ptr() as *mut c_void,
-                    want as i32,
-                )
-            };
-            if n == -1 {
-                crate::inst_end(_t, "read", &self.path, -1, filled);
-                return Err(crate::hdfs_err_ctx("read"));
-            }
-            if n == 0 {
-                break;
-            }
-            filled += n as usize;
-            if !fill {
-                break;
-            }
+        let n = unsafe {
+            hdfsRead(
+                self.fs,
+                self.f,
+                buf.as_ptr() as *mut c_void,
+                buf.len().min(FILE_LIMIT) as i32,
+            )
+        };
+        if n == -1 {
+            crate::inst_end(_t, "read", &self.path, -1, 0);
+            return Err(crate::hdfs_err_ctx("read"));
         }
-        crate::inst_end(_t, "read", &self.path, -1, filled);
-        Ok(filled)
+        crate::inst_end(_t, "read", &self.path, -1, n as usize);
+        Ok(n as usize)
     }
 }
 
@@ -302,35 +272,20 @@ impl Read for &File {
             return Ok(n);
         }
         let _t = crate::inst_start();
-        let fill = crate::read_fill_enabled();
-        let mut filled = 0usize;
-        loop {
-            let want = (buf.len() - filled).min(FILE_LIMIT);
-            if want == 0 {
-                break;
-            }
-            let n = unsafe {
-                hdfsRead(
-                    self.fs,
-                    self.f,
-                    buf[filled..].as_ptr() as *mut c_void,
-                    want as i32,
-                )
-            };
-            if n == -1 {
-                crate::inst_end(_t, "read", &self.path, -1, filled);
-                return Err(crate::hdfs_err_ctx("read"));
-            }
-            if n == 0 {
-                break;
-            }
-            filled += n as usize;
-            if !fill {
-                break;
-            }
+        let n = unsafe {
+            hdfsRead(
+                self.fs,
+                self.f,
+                buf.as_ptr() as *mut c_void,
+                buf.len().min(FILE_LIMIT) as i32,
+            )
+        };
+        if n == -1 {
+            crate::inst_end(_t, "read", &self.path, -1, 0);
+            return Err(crate::hdfs_err_ctx("read"));
         }
-        crate::inst_end(_t, "read", &self.path, -1, filled);
-        Ok(filled)
+        crate::inst_end(_t, "read", &self.path, -1, n as usize);
+        Ok(n as usize)
     }
 }
 
