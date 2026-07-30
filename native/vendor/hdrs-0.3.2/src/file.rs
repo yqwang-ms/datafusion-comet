@@ -115,7 +115,7 @@ impl File {
             let p = CString::new(path)?;
             hdfsOpenFile(fs, p.as_ptr(), libc::O_RDONLY, 0, 0, 0)
         };
-        crate::inst_end(_t, "open", path, -1, 0);
+        crate::inst_end(_t, "open", fs as usize, f as usize, path, -1, 0, 0);
         if f.is_null() {
             return Err(crate::hdfs_err_ctx(&format!("open({path})")));
         }
@@ -134,7 +134,9 @@ impl File {
 
     /// Works only for files opened in read-only mode.
     fn inner_seek(&self, offset: i64) -> Result<()> {
+        let _t = crate::inst_start();
         let n = unsafe { hdfsSeek(self.fs, self.f, offset) };
+        crate::inst_end(_t, "seek", self.fs as usize, self.f as usize, &self.path, offset, 0, 0);
 
         if n == -1 {
             return Err(crate::hdfs_err_ctx("seek"));
@@ -155,20 +157,21 @@ impl File {
 
     pub fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
         let _t = crate::inst_start();
+        let req = buf.len().min(FILE_LIMIT);
         let n = unsafe {
             hdfsPread(
                 self.fs,
                 self.f,
                 offset as i64,
                 buf.as_ptr() as *mut c_void,
-                buf.len().min(FILE_LIMIT) as i32,
+                req as i32,
             )
         };
         if n == -1 {
-            crate::inst_end(_t, "pread", &self.path, offset as i64, 0);
+            crate::inst_end(_t, "pread", self.fs as usize, self.f as usize, &self.path, offset as i64, req, 0);
             return Err(crate::hdfs_err_ctx("pread"));
         }
-        crate::inst_end(_t, "pread", &self.path, offset as i64, n as usize);
+        crate::inst_end(_t, "pread", self.fs as usize, self.f as usize, &self.path, offset as i64, req, n as usize);
         Ok(n as usize)
     }
 }
@@ -184,19 +187,20 @@ impl Read for File {
             return Ok(n);
         }
         let _t = crate::inst_start();
+        let req = buf.len().min(FILE_LIMIT);
         let n = unsafe {
             hdfsRead(
                 self.fs,
                 self.f,
                 buf.as_ptr() as *mut c_void,
-                buf.len().min(FILE_LIMIT) as i32,
+                req as i32,
             )
         };
         if n == -1 {
-            crate::inst_end(_t, "read", &self.path, -1, 0);
+            crate::inst_end(_t, "read", self.fs as usize, self.f as usize, &self.path, -1, req, 0);
             return Err(crate::hdfs_err_ctx("read"));
         }
-        crate::inst_end(_t, "read", &self.path, -1, n as usize);
+        crate::inst_end(_t, "read", self.fs as usize, self.f as usize, &self.path, -1, req, n as usize);
         Ok(n as usize)
     }
 }
@@ -272,19 +276,20 @@ impl Read for &File {
             return Ok(n);
         }
         let _t = crate::inst_start();
+        let req = buf.len().min(FILE_LIMIT);
         let n = unsafe {
             hdfsRead(
                 self.fs,
                 self.f,
                 buf.as_ptr() as *mut c_void,
-                buf.len().min(FILE_LIMIT) as i32,
+                req as i32,
             )
         };
         if n == -1 {
-            crate::inst_end(_t, "read", &self.path, -1, 0);
+            crate::inst_end(_t, "read", self.fs as usize, self.f as usize, &self.path, -1, req, 0);
             return Err(crate::hdfs_err_ctx("read"));
         }
-        crate::inst_end(_t, "read", &self.path, -1, n as usize);
+        crate::inst_end(_t, "read", self.fs as usize, self.f as usize, &self.path, -1, req, n as usize);
         Ok(n as usize)
     }
 }

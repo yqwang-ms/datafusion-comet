@@ -3380,6 +3380,7 @@ name = "hdrs"
 version = "0.3.2"
 dependencies = [
  "blocking",
+ "chrono",
  "errno",
  "futures",
  "hdfs-sys",

@@ -108,18 +108,20 @@ pub(crate) enum HdfsLogMode {
 }
 
 /// Instrumentation verbosity, from `COMET_HDFS_LOG`
-/// (`spark.executorEnv.COMET_HDFS_LOG`), parsed once: unset/`off` → `Off`; `agg`/`on`/`1` →
-/// `Agg`; `trace`/`2` → `Trace`.
+/// (`spark.executorEnv.COMET_HDFS_LOG`), parsed once. NOTE: the default (unset) is currently
+/// **`Trace`** for the `phase3-trace1` benchmark run — set `COMET_HDFS_LOG=off` to disable or
+/// `agg` for periodic aggregates only. (`off`/`0`/`false` → `Off`; `agg`/`on`/`1`/`true` →
+/// `Agg`; `trace`/`2`/unset/other → `Trace`.)
 pub(crate) fn hdfs_log_mode() -> HdfsLogMode {
     use std::sync::OnceLock;
     static M: OnceLock<HdfsLogMode> = OnceLock::new();
     *M.get_or_init(|| match std::env::var("COMET_HDFS_LOG") {
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "trace" | "2" => HdfsLogMode::Trace,
+            "off" | "0" | "false" => HdfsLogMode::Off,
             "agg" | "on" | "1" | "true" => HdfsLogMode::Agg,
-            _ => HdfsLogMode::Off,
+            _ => HdfsLogMode::Trace,
         },
-        Err(_) => HdfsLogMode::Off,
+        Err(_) => HdfsLogMode::Trace,
     })
 }
 
@@ -141,6 +143,7 @@ impl OpAgg {
 static AGG_PREAD: OpAgg = OpAgg::new();
 static AGG_READ: OpAgg = OpAgg::new();
 static AGG_OPEN: OpAgg = OpAgg::new();
+static AGG_SEEK: OpAgg = OpAgg::new();
 static AGG_CONNECT: OpAgg = OpAgg::new();
 
 fn agg_for(kind: &str) -> &'static OpAgg {
@@ -148,8 +151,15 @@ fn agg_for(kind: &str) -> &'static OpAgg {
         "pread" => &AGG_PREAD,
         "read" => &AGG_READ,
         "open" => &AGG_OPEN,
+        "seek" => &AGG_SEEK,
         _ => &AGG_CONNECT,
     }
+}
+
+/// Current local wall-clock time in Spark's log format, e.g. `2026-07-29T07:54:38,793`
+/// (so these lines line up with the executor's Spark log timestamps).
+fn now_local() -> String {
+    chrono::Local::now().format("%Y-%m-%dT%H:%M:%S,%3f").to_string()
 }
 
 /// Start timing a libhdfs op iff instrumentation is enabled (otherwise no clock is read).
@@ -162,10 +172,24 @@ pub(crate) fn inst_start() -> Option<std::time::Instant> {
     }
 }
 
-/// Finish timing a libhdfs op: in `Trace` emit a per-op `COMET_HDFS_OP` line (thread, path,
-/// offset, len, elapsed_us, mbps); in all enabled modes fold into the per-kind aggregate and
-/// print a `COMET_HDFS_AGG` summary every 2000 ops of that kind.
-pub(crate) fn inst_end(t0: Option<std::time::Instant>, kind: &str, path: &str, offset: i64, len: usize) {
+/// Finish timing a libhdfs op: in `Trace` emit a per-op `COMET_HDFS_OP` line (local time +
+/// thread + `fs`/`file` instance pointers + path/offset/req_len/len/elapsed/mbps); in all
+/// enabled modes fold into the per-kind aggregate and print a `COMET_HDFS_AGG` summary every
+/// 2000 ops. `fs`/`file` are the raw `hdfsFS`/`hdfsFile` pointers (as hex addresses) so a log
+/// reader can verify whether the connection handle and the file handle are actually reused
+/// across ops / row groups. `req_len` is the requested `tSize length` passed to
+/// `hdfsPread`/`hdfsRead` (0 for open/seek); `len` is the bytes actually returned, so
+/// `req_len > len` reveals a libhdfs short read.
+pub(crate) fn inst_end(
+    t0: Option<std::time::Instant>,
+    kind: &str,
+    fs: usize,
+    file: usize,
+    path: &str,
+    offset: i64,
+    req_len: usize,
+    len: usize,
+) {
     use std::sync::atomic::Ordering::Relaxed;
     let Some(t0) = t0 else {
         return;
@@ -178,13 +202,14 @@ pub(crate) fn inst_end(t0: Option<std::time::Instant>, kind: &str, path: &str, o
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("{:?}", th.id()));
     if mode == HdfsLogMode::Trace {
+        let ts = now_local();
         let mbps = if nanos > 0 {
             (len as f64) / (nanos as f64 / 1e9) / 1e6
         } else {
             0.0
         };
         eprintln!(
-            "COMET_HDFS_OP\tkind={kind}\tthread={thn}\tpath={path}\toff={offset}\tlen={len}\telapsed_us={}\tmbps={mbps:.1}",
+            "{ts} COMET_HDFS_OP\tkind={kind}\tthread={thn}\tfs=0x{fs:x}\tfile=0x{file:x}\tpath={path}\toff={offset}\treq_len={req_len}\tlen={len}\telapsed_us={}\tmbps={mbps:.1}",
             nanos / 1000
         );
     }
@@ -193,13 +218,14 @@ pub(crate) fn inst_end(t0: Option<std::time::Instant>, kind: &str, path: &str, o
     let b = agg.bytes.fetch_add(len as u64, Relaxed) + len as u64;
     let n = agg.nanos.fetch_add(nanos, Relaxed) + nanos;
     if c % 2000 == 0 {
+        let ts = now_local();
         let mbps = if n > 0 {
             (b as f64) / (n as f64 / 1e9) / 1e6
         } else {
             0.0
         };
         eprintln!(
-            "COMET_HDFS_AGG\tkind={kind}\tthread={thn}\tcount={c}\ttotal_mb={:.1}\tsum_elapsed_s={:.1}\tper_op_mbps={mbps:.1}\tavg_op_us={}\tavg_len={}",
+            "{ts} COMET_HDFS_AGG\tkind={kind}\tthread={thn}\tfs=0x{fs:x}\tfile=0x{file:x}\treq_len={req_len}\tcount={c}\ttotal_mb={:.1}\tsum_elapsed_s={:.1}\tper_op_mbps={mbps:.1}\tavg_op_us={}\tavg_len={}",
             (b as f64) / 1e6,
             (n as f64) / 1e9,
             n / c / 1000,

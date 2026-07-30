@@ -361,7 +361,7 @@ impl OpenOptions {
             // TODO: we need to support buffer size, replication and block size.
             hdfsOpenFile(self.fs, p.as_ptr(), flags, 0, 0, 0)
         };
-        crate::inst_end(_t, "open", path, -1, 0);
+        crate::inst_end(_t, "open", self.fs as usize, b as usize, path, -1, 0, 0);
 
         if b.is_null() {
             return Err(crate::hdfs_err_ctx(&format!("open({path})")));
